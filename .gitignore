@@ -152,3 +152,4 @@ test_datetime.py
 _bash_scripts/backup_postgres_db.sh
 _bash_scripts/kill_postgres_db_conn.sh
 _bash_scripts/main_postgres_bkp.sh
+*.sql

@@ -7,6 +7,7 @@ from time import localtime, strftime
 import yaml
 
 import config as cfg
+from backup_prod_db import alter_db_owner
 from backup_prod_db import backup_database as bkp_db
 from backup_prod_db import restore_database as restore_db
 
@@ -52,15 +53,16 @@ def main():
     ================================================================\n\
                 DB Backup and Restore - Start\n\
                     {date_start}\n\
-    ================================================================\n\
-   "
+    ================================================================"
 
     logger.info(start_msg)
 
     backup_file = db_name + "_" + strftime("%Y%m%d%H%M%S") + ".sql"
+    backup_path = os.path.join("_db_backups", backup_file)
 
-    bkp_db(backup_file)
-    restore_db(backup_file)
+    bkp_db(backup_file, backup_path)
+    restore_db(backup_path)
+    alter_db_owner()
 
     date_end = str(strftime("%A, %d. %B %Y %I:%M%p", localtime()))
 
