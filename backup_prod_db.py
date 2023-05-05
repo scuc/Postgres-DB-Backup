@@ -1,6 +1,5 @@
 import logging
 import logging.config
-import os
 import subprocess
 
 import psycopg2
@@ -75,10 +74,13 @@ def disconnect_users():
     """Disconnect all public users from the DB and return a confirmation."""
 
     db, cursor = connect()
-    query = f"SELECT pg_terminate_backend(pid)FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname='{db_name}' AND leader_pid IS NULL;"
+    query = f"SELECT pg_terminate_backend(pid)\n\
+              FROM pg_stat_activity WHERE pid <> pg_backend_pid()\n\
+              AND datname='{db_name}'\n\
+              AND leader_pid IS NULL;"
 
     try:
-        logger.info(f"pg_terminate all active db connections.")
+        logger.info("pg_terminate all active db connections.")
         cursor.execute(query)
 
         connected_users = cursor.execute("select * from pg_stat_activity;")
