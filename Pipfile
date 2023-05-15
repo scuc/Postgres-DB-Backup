@@ -6,6 +6,8 @@ name = "pypi"
 [packages]
 pyyaml = "*"
 psycopg2 = "*"
+psycopg2-binary = "*"
+psycopg-binary = "*"
 
 [dev-packages]
 
