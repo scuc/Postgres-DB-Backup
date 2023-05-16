@@ -29,7 +29,9 @@ def connect():
         cursor = db.cursor()
         return db, cursor
     except psycopg2.OperationalError as e:
-        print(f"Unable to connect!\n error: {e}")
+        excp_msg = f"Unable to connect!\n error: {e}"
+        print(excp_msg)
+        logger.error(excp_msg)
 
 
 def backup_database(backup_file, backup_path):
@@ -65,7 +67,9 @@ def backup_database(backup_file, backup_path):
             logger.info("DB backup completed.")
 
     except Exception as e:
-        logger.error(f"Exception raised during the DB backup: \n {e}\n")
+        excp_msg = f"Exception raised during the DB backup: \n {e}\n"
+        print(excp_msg)
+        logger.error(excp_msg)
 
     return
 
@@ -74,20 +78,19 @@ def disconnect_users():
     """Disconnect all public users from the DB and return a confirmation."""
 
     db, cursor = connect()
-    query = f"SELECT pg_terminate_backend(pid)\n\
-              FROM pg_stat_activity WHERE pid <> pg_backend_pid()\n\
-              AND datname='{db_name}'\n\
-              AND leader_pid IS NULL;"
+    query = f"SELECT pg_terminate_backend(pid)FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname='{db_name}' AND leader_pid IS NULL;"
 
     try:
-        logger.info("pg_terminate all active db connections.")
+        logger.info(f"pg_terminate all active db connections.")
         cursor.execute(query)
 
         connected_users = cursor.execute("select * from pg_stat_activity;")
         logger.info(f"Number of connected users = {connected_users}")
 
     except Exception as e:
-        logger.error(f"Exception raised during user disconnect: \n {e}\n")
+        excp_msg = f"Exception raised during user disconnect: \n {e}\n"
+        logger.error(excp_msg)
+        print(excp_msg)
 
     return
 
@@ -127,7 +130,9 @@ def restore_database(backup_path):
             logger.info("pg_restore complete.")
 
     except Exception as e:
-        logger.error(f"Exception raised during db restore: \n {e}\n")
+        excp_msg = f"Exception raised during db restore: \n {e}\n"
+        logger.error(excp_msg)
+        print(excp_msg)
 
     return
 
@@ -153,7 +158,7 @@ def log_captured_output(captured_output):
     logger.info(f"Process Args={captured_output.args}")
     logger.info(f"Process return code={captured_output.returncode}")
     logger.info(f"\nProcess STDOUT:\n{captured_output.stdout}")
-    logger.error(f"\nProcess STDERR:\n{captured_output.stderr}")
+    logger.info(f"\nProcess STDERR:\n{captured_output.stderr}")
 
     return
 
