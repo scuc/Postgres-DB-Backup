@@ -9,6 +9,8 @@ import yaml
 import config as cfg
 from backup_prod_db import alter_db_owner
 from backup_prod_db import backup_database as bkp_db
+from backup_prod_db import disconnect_users
+from backup_prod_db import recreate_target_db as recreate_db
 from backup_prod_db import restore_database as restore_db
 
 config = cfg.get_config()
@@ -61,6 +63,8 @@ def main():
     backup_path = os.path.join("_db_backups", backup_file)
 
     bkp_db(backup_file, backup_path)
+    disconnect_users()
+    recreate_db()
     restore_db(backup_path)
     alter_db_owner()
 

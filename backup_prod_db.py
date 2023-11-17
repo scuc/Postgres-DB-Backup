@@ -17,12 +17,13 @@ db_host = config["db_host"]
 db_port = config["db_port"]
 # backup_path = config["backup_path"]
 root_path = config["script_root_path"]
+db_dev_name = config["db_dev_name"]
 
 
 logger = logging.getLogger(__name__)
 
 
-def connect():
+def connect(db_name):
     """Open a connection the the postgres db."""
     try:
         db = psycopg2.connect(dbname=db_name, user=db_owner)
@@ -77,7 +78,7 @@ def backup_database(backup_file, backup_path):
 def disconnect_users():
     """Disconnect all public users from the DB and return a confirmation."""
 
-    db, cursor = connect()
+    db, cursor = connect(db_name)
     query = f"SELECT pg_terminate_backend(pid)FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname='{db_name}' AND leader_pid IS NULL;"
 
     try:
@@ -91,6 +92,28 @@ def disconnect_users():
         excp_msg = f"Exception raised during user disconnect: \n {e}\n"
         logger.error(excp_msg)
         print(excp_msg)
+
+    return
+
+
+def recreate_target_db():
+    """Drop existing DB and create a new empty copy to restore backup into"""
+
+    try:
+        db, cursor = connect(db_dev_name)
+
+        db.autocommit = True
+
+        dropdb_query = f"DROP DATABASE {db_name};"
+        createdb_query = f"CREATE DATABASE {db_name}"
+
+        cursor.execute(dropdb_query)
+        cursor.execute(createdb_query)
+
+        logger.info(f"DB Drop and Create executed: {db_name}")
+
+    except Exception as e:
+        logger.error(f"DB Drop/Create failed with error: {e}")
 
     return
 
@@ -110,7 +133,6 @@ def restore_database(backup_path):
     ]
 
     try:
-        disconnect_users()
         logger.info(f"Attempting pg_restore of db: {db_name}")
         pgrestore_process = subprocess.run(
             cmd_str,
@@ -138,7 +160,7 @@ def restore_database(backup_path):
 
 
 def alter_db_owner():
-    db, cursor = connect()
+    db, cursor = connect(db_name)
 
     query_db_privileges = f"GRANT ALL PRIVILEGES ON DATABASE {db_name} to {db_admin};"
     cursor.execute(query_db_privileges)
