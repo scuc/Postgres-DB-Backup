@@ -121,12 +121,26 @@ def recreate_target_db():
 def restore_database(backup_path):
     """Restore most recent backup of the pg db"""
 
-    cmd_str = [
+    cmd_str_schema = [
         "pg_restore",
         "-v",
         "-e",
         f"-U{db_owner}",
-        "--clean",
+        "--schema-only",
+        "--single-transaction",
+        f"--role={db_owner}",
+        f"--dbname={db_name}",
+        backup_path,
+    ]
+
+    cmd_str_data = [
+        "pg_restore",
+        "-v",
+        "-e",
+        f"-U{db_owner}",
+        "--data-only",
+        "--single-transaction",
+        "--exit-on-error",
         f"--role={db_owner}",
         f"--dbname={db_name}",
         backup_path,
@@ -134,22 +148,37 @@ def restore_database(backup_path):
 
     try:
         logger.info(f"Attempting pg_restore of db: {db_name}")
-        pgrestore_process = subprocess.run(
-            cmd_str,
+        pgrestore_schema = subprocess.run(
+            cmd_str_schema,
             capture_output=True,
             check=True,
             text=True,
             timeout=120,
         )
 
-        log_captured_output(pgrestore_process)
+        log_captured_output(pgrestore_schema)
 
-        if pgrestore_process.returncode != 0:
+        if pgrestore_schema.returncode != 0:
             logger.error(
                 "pg_restore exited with non-zero value, db restore not complete."
             )
         else:
-            logger.info("pg_restore complete.")
+            logger.info("pg_restore for schema-only is complete.")
+
+            pgrestore_data = subprocess.run(
+                cmd_str_data,
+                capture_output=True,
+                check=True,
+                text=True,
+                timeout=120,
+            )
+
+            if pgrestore_data.returncode != 0:
+                logger.error(
+                    "pg_restore exited with non-zero value, db restore not complete."
+                )
+            else:
+                logger.info("pg_restore for data-only is complete.")
 
     except Exception as e:
         excp_msg = f"Exception raised during db restore: \n {e}\n"
