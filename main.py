@@ -7,9 +7,8 @@ from time import localtime, strftime
 import yaml
 
 import config as cfg
-from backup_prod_db import alter_db_owner
+from backup_prod_db import alter_db_owner, disconnect_users
 from backup_prod_db import backup_database as bkp_db
-from backup_prod_db import disconnect_users
 from backup_prod_db import recreate_target_db as recreate_db
 from backup_prod_db import restore_database as restore_db
 
@@ -49,6 +48,15 @@ def set_logger():
 
 
 def main():
+    """
+    This function performs the DB Backup and Restore process.
+
+    It creates a backup of the database, disconnects users, recreates the database,
+    restores the database from the backup, and alters the database owner.
+
+    Returns:
+        None
+    """
     date_start = str(strftime("%A, %d. %B %Y %I:%M%p", localtime()))
 
     start_msg = f"\n\
