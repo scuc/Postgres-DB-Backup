@@ -1,5 +1,5 @@
 import logging
-import logging.config
+import os
 import subprocess
 import sys
 import traceback
@@ -80,13 +80,7 @@ def connect(db_name):
             f"Connection parameters - Host: {db_host}, Port: {db_port}, User: {db_owner}"
         )
 
-        db = psycopg2.connect(
-            dbname=db_name,
-            user=db_owner,
-            host=db_host,
-            port=db_port,
-            password=db_password,
-        )
+        db = psycopg2.connect(dbname=db_name, user=db_owner, host=db_host, port=db_port)
         cursor = db.cursor()
 
         logger.info(f"Successfully connected to database: {db_name}")
@@ -158,10 +152,6 @@ def backup_database(backup_file, backup_path):
             check=True,
             text=True,
             timeout=300,  # Increased timeout to 5 minutes
-            env={
-                **os.environ,
-                "PGPASSWORD": db_password,
-            },  # Set password via environment
         )
 
         log_captured_output(pgdump_process)
@@ -374,7 +364,6 @@ def restore_database(backup_path):
             check=True,
             text=True,
             timeout=300,
-            env={**os.environ, "PGPASSWORD": db_password},
         )
 
         log_captured_output(pgrestore_schema)
@@ -412,7 +401,6 @@ def restore_database(backup_path):
             check=True,
             text=True,
             timeout=600,  # 10 minutes for data restore
-            env={**os.environ, "PGPASSWORD": db_password},
         )
 
         log_captured_output(pgrestore_data)
