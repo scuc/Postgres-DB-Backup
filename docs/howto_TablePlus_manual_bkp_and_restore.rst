@@ -11,6 +11,7 @@
 
 # Restore
 
+    - if the target db already exists, use psql to DROP the target db
     - select "restore" within TablePlus app
     - use TablePlus to connect to the target db (local or dev, etc)
     - select the 'db.dump' backup from its saved location
