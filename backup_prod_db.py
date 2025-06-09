@@ -1,4 +1,5 @@
 import logging
+import logging.config
 import os
 import subprocess
 import sys
@@ -20,9 +21,9 @@ prod_db_host = config["db_host"]
 prod_db_port = config["db_port"]
 
 # Local database (target for restore) - with defaults
-local_db_name = config.get("local_db_name", "ngceng_prod_db")  # Default name
+local_db_name = config.get("local_db_name", "ngceng_local_db")  # Default name
 local_db_owner = config.get("local_db_owner", "postgres")  # Default to postgres user
-local_db_admin = config.get("local_db_admin", "ngceng")  # Default to postgres admin
+local_db_admin = config.get("local_db_admin", "postgres")  # Default to postgres admin
 local_db_host = config.get("local_db_host", "localhost")  # Default to localhost
 local_db_port = config.get("local_db_port", "5432")  # Default to 5432
 
@@ -206,6 +207,55 @@ def validate_backup_prerequisites(backup_path):
         logger.warning("Low disk space detected - backup may fail")
 
 
+def filter_sql_backup(backup_path):
+    """Filter out problematic SQL statements for cross-version compatibility"""
+    filtered_path = backup_path.replace(".sql", "_filtered.sql")
+
+    logger.info(
+        f"Filtering SQL backup for compatibility: {backup_path} -> {filtered_path}"
+    )
+
+    # Specific problematic SET statements to remove
+    problematic_patterns = [
+        r"^SET transaction_timeout\s*=",
+        r"^SET idle_in_transaction_session_timeout\s*=",
+        r"^SET row_security\s*=",
+        r"^SET default_table_access_method\s*=",
+        r"^SET xmloption\s*=",
+    ]
+
+    import re
+
+    try:
+        with (
+            open(backup_path, "r", encoding="utf-8") as infile,
+            open(filtered_path, "w", encoding="utf-8") as outfile,
+        ):
+
+            filtered_lines = 0
+            for line_num, line in enumerate(infile, 1):
+                # Check if line matches any problematic patterns
+                should_skip = any(
+                    re.match(pattern, line.strip()) for pattern in problematic_patterns
+                )
+
+                if should_skip:
+                    logger.debug(f"Filtering out line {line_num}: {line.strip()}")
+                    filtered_lines += 1
+                    # Write a comment instead to maintain line structure
+                    outfile.write(f"-- FILTERED: {line}")
+                else:
+                    outfile.write(line)
+
+            logger.info(f"Filtered {filtered_lines} problematic lines from SQL backup")
+            return filtered_path
+
+    except Exception as e:
+        logger.error(f"Failed to filter SQL backup: {e}")
+        # Return original path if filtering fails
+        return backup_path
+
+
 def backup_database(backup_file, backup_path):
     """Use pg_dump to take a full backup of the REMOTE production db"""
     operation_name = f"Database Backup of {prod_db_name}"
@@ -225,7 +275,10 @@ def backup_database(backup_file, backup_path):
             f"-U{prod_db_admin}",
             f"-d{prod_db_name}",
             "--no-owner",
-            "--format=custom",
+            "--no-privileges",
+            "--format=plain",
+            "--no-comments",
+            "--no-security-labels",
             "-v",
             f"-f{backup_path}",
         ]
@@ -268,18 +321,18 @@ def backup_database(backup_file, backup_path):
 
     except subprocess.TimeoutExpired as e:
         context = {
-            "database": db_name,
+            "database": prod_db_name,
             "timeout_seconds": 300,
-            "command": " ".join(cmd_str),
+            "command": " ".join(cmd_str) if "cmd_str" in locals() else "unknown",
         }
         log_exception(operation_name, e, context)
         raise DatabaseBackupError(f"Backup operation timed out after 5 minutes")
 
     except subprocess.CalledProcessError as e:
         context = {
-            "database": db_name,
+            "database": prod_db_name,
             "return_code": e.returncode,
-            "command": " ".join(cmd_str),
+            "command": " ".join(cmd_str) if "cmd_str" in locals() else "unknown",
             "stdout": e.stdout,
             "stderr": e.stderr,
         }
@@ -432,84 +485,49 @@ def restore_database(backup_path):
         file_size = backup_file_path.stat().st_size
         logger.info(f"Backup file size: {file_size / (1024**2):.2f} MB")
 
-        # Schema restore
-        cmd_str_schema = [
-            "pg_restore",
-            "-v",
-            "-e",
-            f"-h{local_db_host}",
-            f"-U{local_db_owner}",
-            "--schema-only",
-            "--single-transaction",
-            f"--role={local_db_owner}",
-            f"--dbname={local_db_name}",
-            backup_path,
-        ]
+        # Filter the SQL backup for compatibility
+        if backup_path.endswith(".sql"):
+            filtered_backup_path = filter_sql_backup(backup_path)
+        else:
+            filtered_backup_path = backup_path
 
-        logger.info("Starting schema restore")
-        logger.info(f"Schema restore command: {' '.join(cmd_str_schema)}")
+        # For plain format, use psql instead of pg_restore
+        if filtered_backup_path.endswith(".sql"):
+            cmd_str_restore = [
+                "psql",
+                f"-h{local_db_host}",
+                f"-U{local_db_owner}",
+                f"-d{local_db_name}",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-f",
+                filtered_backup_path,
+            ]
 
-        pgrestore_schema = subprocess.run(
-            cmd_str_schema,
-            capture_output=True,
-            check=True,
-            text=True,
-            timeout=300,
-        )
+            logger.info("Starting database restore using psql")
+            logger.info(f"Restore command: {' '.join(cmd_str_restore)}")
 
-        log_captured_output(pgrestore_schema)
-
-        if pgrestore_schema.returncode != 0:
-            error_msg = (
-                f"Schema restore failed with return code {pgrestore_schema.returncode}"
+            psql_process = subprocess.run(
+                cmd_str_restore,
+                capture_output=True,
+                check=True,
+                text=True,
+                timeout=600,  # 10 minutes
             )
-            logger.error(error_msg)
-            raise DatabaseRestoreError(error_msg)
 
-        logger.info("Schema restore completed successfully")
+            log_captured_output(psql_process)
 
-        # Data restore
-        cmd_str_data = [
-            "pg_restore",
-            "-v",
-            "-e",
-            f"-h{local_db_host}",
-            f"-U{local_db_owner}",
-            "--data-only",
-            "--single-transaction",
-            "--exit-on-error",
-            f"--role={local_db_owner}",
-            f"--dbname={local_db_name}",
-            backup_path,
-        ]
+            if psql_process.returncode != 0:
+                error_msg = f"Database restore failed with return code {psql_process.returncode}"
+                logger.error(error_msg)
+                raise DatabaseRestoreError(error_msg)
 
-        logger.info("Starting data restore")
-        logger.info(f"Data restore command: {' '.join(cmd_str_data)}")
-
-        pgrestore_data = subprocess.run(
-            cmd_str_data,
-            capture_output=True,
-            check=True,
-            text=True,
-            timeout=600,  # 10 minutes for data restore
-        )
-
-        log_captured_output(pgrestore_data)
-
-        if pgrestore_data.returncode != 0:
-            error_msg = (
-                f"Data restore failed with return code {pgrestore_data.returncode}"
-            )
-            logger.error(error_msg)
-            raise DatabaseRestoreError(error_msg)
-
-        logger.info("Data restore completed successfully")
-        logger.info("Full database restore completed successfully")
-        return True
+            logger.info("Database restore completed successfully")
+            return True
 
     except subprocess.TimeoutExpired as e:
         context = {
-            "database": db_name,
+            "database": local_db_name,
             "backup_path": backup_path,
             "phase": "schema" if "schema" in str(e.cmd) else "data",
         }
@@ -518,7 +536,7 @@ def restore_database(backup_path):
 
     except subprocess.CalledProcessError as e:
         context = {
-            "database": db_name,
+            "database": local_db_name,
             "backup_path": backup_path,
             "return_code": e.returncode,
             "command": " ".join(e.cmd) if e.cmd else "unknown",
