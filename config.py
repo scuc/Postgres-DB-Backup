@@ -19,7 +19,7 @@ def ensure_dirs(source_path):
     Check source directory for required folders.
     """
     owd = os.getcwd()
-    dirs = ["_logs", "json"]
+    dirs = ["logs", "json"]
     os.chdir(source_path)
 
     for dir in dirs:
