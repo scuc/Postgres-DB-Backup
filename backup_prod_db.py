@@ -12,17 +12,29 @@ import config as cfg
 
 config = cfg.get_config()
 
-db_name = config["db_name"]
-db_owner = config["db_owner"]
-db_admin = config["db_admin"]
-# db_admin_pw: config["db_admin_pw"]
-db_password = config["db_password"]
-db_host = config["db_host"]
-db_port = config["db_port"]
-# backup_path = config["backup_path"]
+# Production database (source for backup)
+prod_db_name = config["db_name"]
+prod_db_owner = config["db_owner"]
+prod_db_admin = config["db_admin"]
+prod_db_host = config["db_host"]
+prod_db_port = config["db_port"]
+
+# Local database (target for restore) - with defaults
+local_db_name = config.get("local_db_name", "ngceng_prod_db")  # Default name
+local_db_owner = config.get("local_db_owner", "postgres")  # Default to postgres user
+local_db_admin = config.get("local_db_admin", "ngceng")  # Default to postgres admin
+local_db_host = config.get("local_db_host", "localhost")  # Default to localhost
+local_db_port = config.get("local_db_port", "5432")  # Default to 5432
+
+# Legacy variables for backward compatibility
+db_name = prod_db_name
+db_owner = prod_db_owner
+db_admin = prod_db_admin
+db_host = prod_db_host
+db_port = prod_db_port
+
 root_path = config["script_root_path"]
 db_dev_name = config["db_dev_name"]
-
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +49,41 @@ class DatabaseRestoreError(Exception):
     """Custom exception for database restore operations"""
 
     pass
+
+
+def read_pgpass_password(host, port, database, username):
+    """Read password from .pgpass file"""
+    import os
+    from pathlib import Path
+
+    pgpass_file = Path.home() / ".pgpass"
+    if not pgpass_file.exists():
+        return None
+
+    try:
+        with open(pgpass_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    parts = line.split(":")
+                    if len(parts) >= 5:
+                        pg_host, pg_port, pg_db, pg_user = parts[:4]
+                        pg_password = ":".join(
+                            parts[4:]
+                        )  # Handle passwords with colons
+
+                        # Match host, port, database, and user (* is wildcard)
+                        if (
+                            (pg_host == host or pg_host == "*")
+                            and (pg_port == str(port) or pg_port == "*")
+                            and (pg_db == database or pg_db == "*")
+                            and (pg_user == username or pg_user == "*")
+                        ):
+                            return pg_password
+    except Exception as e:
+        logger.warning(f"Could not read .pgpass file: {e}")
+
+    return None
 
 
 def log_exception(operation_name, exception, additional_context=None):
@@ -70,36 +117,74 @@ def log_exception(operation_name, exception, additional_context=None):
     return error_details
 
 
-def connect(db_name):
-    """Open a connection the the postgres db with enhanced error handling."""
+def connect(db_name, use_local=False):
+    """Open a connection to the postgres db with enhanced error handling.
+
+    Args:
+        db_name: Database name to connect to
+        use_local: If True, connect to local database, otherwise remote
+    """
     operation_name = f"Database Connection to {db_name}"
 
+    # Choose connection parameters based on target
+    if use_local:
+        host = local_db_host
+        port = local_db_port
+        owner = local_db_owner
+        target_type = "local"
+    else:
+        host = prod_db_host
+        port = prod_db_port
+        owner = prod_db_owner
+        target_type = "remote"
+
     try:
-        logger.info(f"Attempting to connect to database: {db_name}")
+        logger.info(f"Attempting to connect to {target_type} database: {db_name}")
         logger.debug(
-            f"Connection parameters - Host: {db_host}, Port: {db_port}, User: {db_owner}"
+            f"Connection parameters - Host: {host}, Port: {port}, User: {owner}"
         )
 
-        db = psycopg2.connect(dbname=db_name, user=db_owner, host=db_host, port=db_port)
+        # Try to get password from .pgpass file or environment
+        password = read_pgpass_password(host, port, db_name, owner)
+        if not password:
+            password = os.environ.get("PGPASSWORD")
+
+        connection_params = {
+            "dbname": db_name,
+            "user": owner,
+            "host": host,
+            "port": port,
+        }
+
+        if password:
+            connection_params["password"] = password
+            logger.debug("Using password from .pgpass file or environment")
+        else:
+            logger.debug("No password found, attempting connection without password")
+
+        db = psycopg2.connect(**connection_params)
         cursor = db.cursor()
 
-        logger.info(f"Successfully connected to database: {db_name}")
+        logger.info(f"Successfully connected to {target_type} database: {db_name}")
         return db, cursor
 
     except OperationalError as e:
         context = {
             "database": db_name,
-            "host": db_host,
-            "port": db_port,
-            "user": db_owner,
+            "host": host,
+            "port": port,
+            "user": owner,
+            "target_type": target_type,
         }
         log_exception(operation_name, e, context)
-        raise DatabaseBackupError(f"Failed to connect to database {db_name}: {e}")
+        raise DatabaseBackupError(
+            f"Failed to connect to {target_type} database {db_name}: {e}"
+        )
 
     except Exception as e:
         log_exception(operation_name, e)
         raise DatabaseBackupError(
-            f"Unexpected error connecting to database {db_name}: {e}"
+            f"Unexpected error connecting to {target_type} database {db_name}: {e}"
         )
 
 
@@ -122,11 +207,12 @@ def validate_backup_prerequisites(backup_path):
 
 
 def backup_database(backup_file, backup_path):
-    """Use pg_dump to take a full backup of the production db with enhanced error handling"""
-    operation_name = f"Database Backup of {db_name}"
+    """Use pg_dump to take a full backup of the REMOTE production db"""
+    operation_name = f"Database Backup of {prod_db_name}"
 
     try:
-        logger.info(f"Starting backup operation for database: {db_name}")
+        logger.info(f"Starting backup operation for REMOTE database: {prod_db_name}")
+        logger.info(f"Source: {prod_db_host}:{prod_db_port}")
         logger.info(f"Backup file: {backup_file}")
         logger.info(f"Backup path: {backup_path}")
 
@@ -135,9 +221,9 @@ def backup_database(backup_file, backup_path):
 
         cmd_str = [
             "pg_dump",
-            f"-h{db_host}",
-            f"-U{db_admin}",
-            f"-d{db_name}",
+            f"-h{prod_db_host}",
+            f"-U{prod_db_admin}",
+            f"-d{prod_db_name}",
             "--no-owner",
             "--format=custom",
             "-v",
@@ -201,24 +287,25 @@ def backup_database(backup_file, backup_path):
         raise DatabaseBackupError(f"pg_dump failed with return code {e.returncode}")
 
     except Exception as e:
-        context = {"database": db_name, "backup_path": backup_path}
+        context = {"database": prod_db_name, "backup_path": backup_path}
         log_exception(operation_name, e, context)
         raise DatabaseBackupError(f"Unexpected error during backup: {e}")
 
 
 def disconnect_users():
-    """Disconnect all public users from the DB with enhanced error handling"""
-    operation_name = f"Disconnect Users from {db_name}"
+    """Disconnect all public users from the LOCAL DB with enhanced error handling"""
+    operation_name = f"Disconnect Users from LOCAL {local_db_name}"
     db = None
     cursor = None
 
     try:
-        logger.info(f"Starting user disconnection for database: {db_name}")
+        logger.info(f"Starting user disconnection for LOCAL database: {local_db_name}")
+        logger.info(f"Target: {local_db_host}:{local_db_port}")
 
-        db, cursor = connect(db_name)
+        db, cursor = connect(local_db_name, use_local=True)
 
         # First, get count of active connections
-        count_query = f"SELECT count(*) FROM pg_stat_activity WHERE datname='{db_name}' AND pid <> pg_backend_pid() AND leader_pid IS NULL;"
+        count_query = f"SELECT count(*) FROM pg_stat_activity WHERE datname='{local_db_name}' AND pid <> pg_backend_pid() AND leader_pid IS NULL;"
         cursor.execute(count_query)
         active_connections = cursor.fetchone()[0]
 
@@ -229,7 +316,7 @@ def disconnect_users():
             return True
 
         # Terminate connections
-        terminate_query = f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname='{db_name}' AND leader_pid IS NULL;"
+        terminate_query = f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname='{local_db_name}' AND leader_pid IS NULL;"
 
         logger.info("Executing pg_terminate_backend for all active connections")
         cursor.execute(terminate_query)
@@ -253,7 +340,7 @@ def disconnect_users():
 
     except (OperationalError, DatabaseError) as e:
         context = {
-            "database": db_name,
+            "database": local_db_name,
             "active_connections": locals().get("active_connections", "unknown"),
         }
         log_exception(operation_name, e, context)
@@ -271,42 +358,45 @@ def disconnect_users():
 
 
 def recreate_target_db():
-    """Drop existing DB and create a new empty copy with enhanced error handling"""
-    operation_name = f"Recreate Database {db_name}"
+    """Drop existing LOCAL DB and create a new empty copy with enhanced error handling"""
+    operation_name = f"Recreate LOCAL Database {local_db_name}"
     db = None
     cursor = None
 
     try:
-        logger.info(f"Starting database recreation for: {db_name}")
+        logger.info(f"Starting database recreation for LOCAL database: {local_db_name}")
+        logger.info(f"Target: {local_db_host}:{local_db_port}")
 
         # Connect to a different database to drop/create the target
-        db, cursor = connect(db_dev_name)
+        db, cursor = connect(db_dev_name, use_local=True)
         db.autocommit = True
 
         # Check if database exists first
-        check_query = f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'"
+        check_query = f"SELECT 1 FROM pg_database WHERE datname = '{local_db_name}'"
         cursor.execute(check_query)
         db_exists = cursor.fetchone() is not None
 
         if db_exists:
-            logger.info(f"Database {db_name} exists, proceeding with drop")
-            dropdb_query = f"DROP DATABASE {db_name};"
+            logger.info(f"LOCAL database {local_db_name} exists, proceeding with drop")
+            dropdb_query = f"DROP DATABASE {local_db_name};"
             cursor.execute(dropdb_query)
-            logger.info(f"Database {db_name} dropped successfully")
+            logger.info(f"LOCAL database {local_db_name} dropped successfully")
         else:
-            logger.info(f"Database {db_name} does not exist, skipping drop")
+            logger.info(f"LOCAL database {local_db_name} does not exist, skipping drop")
 
-        createdb_query = f"CREATE DATABASE {db_name} OWNER {db_owner};"
+        createdb_query = f"CREATE DATABASE {local_db_name} OWNER {local_db_owner};"
         cursor.execute(createdb_query)
-        logger.info(f"Database {db_name} created successfully with owner {db_owner}")
+        logger.info(
+            f"LOCAL database {local_db_name} created successfully with owner {local_db_owner}"
+        )
 
         return True
 
     except (OperationalError, DatabaseError) as e:
         context = {
-            "target_database": db_name,
+            "target_database": local_db_name,
             "admin_database": db_dev_name,
-            "database_owner": db_owner,
+            "database_owner": local_db_owner,
         }
         log_exception(operation_name, e, context)
         raise DatabaseBackupError(f"Database error during recreation: {e}")
@@ -323,11 +413,12 @@ def recreate_target_db():
 
 
 def restore_database(backup_path):
-    """Restore database from backup with enhanced error handling"""
-    operation_name = f"Database Restore of {db_name}"
+    """Restore database from backup to LOCAL database with enhanced error handling"""
+    operation_name = f"Database Restore to LOCAL {local_db_name}"
 
     try:
-        logger.info(f"Starting database restore for: {db_name}")
+        logger.info(f"Starting database restore to LOCAL database: {local_db_name}")
+        logger.info(f"Target: {local_db_host}:{local_db_port}")
         logger.info(f"Restore source: {backup_path}")
 
         # Verify backup file exists and is readable
@@ -346,12 +437,12 @@ def restore_database(backup_path):
             "pg_restore",
             "-v",
             "-e",
-            f"-h{db_host}",
-            f"-U{db_owner}",
+            f"-h{local_db_host}",
+            f"-U{local_db_owner}",
             "--schema-only",
             "--single-transaction",
-            f"--role={db_owner}",
-            f"--dbname={db_name}",
+            f"--role={local_db_owner}",
+            f"--dbname={local_db_name}",
             backup_path,
         ]
 
@@ -382,13 +473,13 @@ def restore_database(backup_path):
             "pg_restore",
             "-v",
             "-e",
-            f"-h{db_host}",
-            f"-U{db_owner}",
+            f"-h{local_db_host}",
+            f"-U{local_db_owner}",
             "--data-only",
             "--single-transaction",
             "--exit-on-error",
-            f"--role={db_owner}",
-            f"--dbname={db_name}",
+            f"--role={local_db_owner}",
+            f"--dbname={local_db_name}",
             backup_path,
         ]
 
@@ -438,45 +529,50 @@ def restore_database(backup_path):
         raise DatabaseRestoreError(f"pg_restore failed with return code {e.returncode}")
 
     except Exception as e:
-        context = {"database": db_name, "backup_path": backup_path}
+        context = {"database": local_db_name, "backup_path": backup_path}
         log_exception(operation_name, e, context)
         raise DatabaseRestoreError(f"Unexpected error during restore: {e}")
 
 
 def alter_db_owner():
-    """Alter database ownership with enhanced error handling"""
-    operation_name = f"Alter DB Owner for {db_name}"
+    """Alter LOCAL database ownership with enhanced error handling"""
+    operation_name = f"Alter DB Owner for LOCAL {local_db_name}"
     db = None
     cursor = None
 
     try:
-        logger.info(f"Starting ownership modification for database: {db_name}")
+        logger.info(
+            f"Starting ownership modification for LOCAL database: {local_db_name}"
+        )
+        logger.info(f"Target: {local_db_host}:{local_db_port}")
 
-        db, cursor = connect(db_name)
+        db, cursor = connect(local_db_name, use_local=True)
 
         # Grant privileges
         query_db_privileges = (
-            f"GRANT ALL PRIVILEGES ON DATABASE {db_name} TO {db_admin};"
+            f"GRANT ALL PRIVILEGES ON DATABASE {local_db_name} TO {local_db_admin};"
         )
-        logger.info(f"Granting all privileges to {db_admin}")
+        logger.info(f"Granting all privileges to {local_db_admin}")
         cursor.execute(query_db_privileges)
         db.commit()
-        logger.info(f"All privileges of db {db_name} granted to '{db_admin}'")
+        logger.info(
+            f"All privileges of LOCAL db {local_db_name} granted to '{local_db_admin}'"
+        )
 
         # Alter owner
-        query_db_owner = f"ALTER DATABASE {db_name} OWNER TO {db_owner};"
-        logger.info(f"Changing database owner to {db_owner}")
+        query_db_owner = f"ALTER DATABASE {local_db_name} OWNER TO {local_db_owner};"
+        logger.info(f"Changing LOCAL database owner to {local_db_owner}")
         cursor.execute(query_db_owner)
         db.commit()
-        logger.info(f"DB owner altered to '{db_owner}'")
+        logger.info(f"LOCAL DB owner altered to '{local_db_owner}'")
 
         return True
 
     except (OperationalError, DatabaseError) as e:
         context = {
-            "database": db_name,
-            "target_owner": db_owner,
-            "admin_user": db_admin,
+            "database": local_db_name,
+            "target_owner": local_db_owner,
+            "admin_user": local_db_admin,
         }
         log_exception(operation_name, e, context)
         raise DatabaseBackupError(f"Database error during ownership change: {e}")
@@ -513,8 +609,15 @@ def log_captured_output(captured_output):
 
 if __name__ == "__main__":
     try:
-        db, cursor = connect(db_name)
-        logger.info("Connection test successful")
+        # Test remote connection (for backup)
+        db, cursor = connect(prod_db_name, use_local=False)
+        logger.info("Remote connection test successful")
+        cursor.close()
+        db.close()
+
+        # Test local connection (for restore)
+        db, cursor = connect(db_dev_name, use_local=True)
+        logger.info("Local connection test successful")
         cursor.close()
         db.close()
     except Exception as e:
